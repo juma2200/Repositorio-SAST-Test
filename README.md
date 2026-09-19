@@ -3,7 +3,7 @@
 Repositorio creado para evaluar herramientas SAST:
 
 - Snyk Code
-- Checkmarx
+- Semgrep
 - SonarQube
 
 El código contiene vulnerabilidades intencionales para fines académicos.
