@@ -1,107 +1,165 @@
 import java.io.File;
+import java.io.IOException;
+import java.nio.file.InvalidPathException;
+import java.nio.file.Path;
+import java.nio.file.Paths;
 import java.sql.Connection;
 import java.sql.DriverManager;
-import java.sql.Statement;
+import java.sql.PreparedStatement;
+import java.sql.ResultSet;
+import java.sql.SQLException;
 import java.util.Scanner;
+import java.util.concurrent.TimeUnit;
+import java.util.logging.Level;
+import java.util.logging.Logger;
+import java.util.regex.Pattern;
 
 /*
- * Aplicación DELIBERADAMENTE VULNERABLE (ejercicio "Implementar SAST On-Premise").
- * Uso exclusivo educativo. Ejecutar solo en una máquina local.
+ * VERSIÓN CORREGIDA del ejercicio "Implementar SAST On-Premise".
  *
- * Marcas usadas en los comentarios:
- *   [VULN-XX]    -> problema de seguridad (con su CWE y la regla típica de SonarQube)
- *   [CALIDAD-XX] -> problema de calidad / mantenibilidad
+ * Marcas usadas en los comentarios (los números coinciden con la versión
+ * vulnerable):
+ *   [CORREGIDO VULN-XX]    -> falla de seguridad que se corrigió
+ *   [CORREGIDO CALIDAD-XX] -> problema de calidad que se corrigió
  */
 public class App {
 
-    // [VULN-01] Credenciales escritas directamente en el código (CWE-798).
-    // Cualquiera que vea el repositorio puede leerlas. Deberían venir de
-    // variables de entorno o de un gestor de secretos.
-    // SonarQube: S2068 (hard-coded credentials).
-    private static final String PASSWORD = "admin123";
-    private static final String API_KEY = "12345-SECRET-KEY";
+    // [CORREGIDO CALIDAD-02] Se usa un Logger en vez de imprimir errores
+    // directamente en pantalla.
+    private static final Logger LOGGER = Logger.getLogger(App.class.getName());
+
+    // [CORREGIDO VULN-01] Se eliminaron PASSWORD y API_KEY del código. Las
+    // credenciales de la base de datos se leen desde variables de entorno
+    // (DB_USER y DB_PASSWORD).
+    private static final String DB_URL = "jdbc:mysql://localhost:3306/test";
+
+    // [CORREGIDO VULN-06] Carpeta base permitida para los archivos.
+    private static final Path CARPETA_BASE =
+            Paths.get("archivos").toAbsolutePath().normalize();
+
+    // [CORREGIDO VULN-02] Validación de la entrada con lista de caracteres
+    // permitidos: letras, números, punto y guion; debe empezar con letra o
+    // número (así nunca puede parecer una opción como "-f").
+    private static final Pattern PATRON_SEGURO =
+            Pattern.compile("^[A-Za-z0-9][A-Za-z0-9.-]{0,49}$");
 
     public static void main(String[] args) {
 
-        // [CALIDAD-01] El Scanner solo se cierra al final; si ocurre un error
-        // antes, queda abierto. Debería usarse try-with-resources.
-        Scanner sc = new Scanner(System.in);
+        // [CORREGIDO CALIDAD-01] try-with-resources: el Scanner se cierra
+        // siempre, aunque ocurra un error.
+        try (Scanner sc = new Scanner(System.in)) {
 
-        // [VULN-02] Los datos ingresados por el usuario no se validan ni se
-        // limpian (CWE-20). Todo lo que se escribe aquí se usa después en
-        // una consulta SQL, en un archivo y en un comando del sistema.
-        System.out.print("Ingrese nombre de usuario: ");
-        String usuario = sc.nextLine();
+            System.out.print("Ingrese nombre de usuario: ");
+            String usuario = sc.nextLine();
 
-        System.out.print("Ingrese nombre de archivo: ");
-        String archivo = sc.nextLine();
+            System.out.print("Ingrese nombre de archivo: ");
+            String archivo = sc.nextLine();
 
-        // [CALIDAD-02] Captura genérica de Exception: mezcla todos los errores
-        // posibles y dificulta saber qué falló. SonarQube: S2221.
-        try {
+            // [CORREGIDO VULN-02] Si el usuario no cumple el formato, no se
+            // continúa.
+            if (!PATRON_SEGURO.matcher(usuario).matches()) {
+                System.out.println("Nombre de usuario inválido.");
+                return;
+            }
 
-            // [VULN-03] Se conecta a la base de datos con el usuario "root"
-            // (máximos privilegios) y con la contraseña escrita en el código
-            // (CWE-250 / CWE-798). Debería usarse un usuario con permisos
-            // mínimos y credenciales externas.
-            // [CALIDAD-03] Connection y Statement no se cierran si ocurre una
-            // excepción antes de con.close() (fuga de recursos, CWE-772).
-            // Debería usarse try-with-resources. SonarQube: S2095.
-            Connection con = DriverManager.getConnection(
-                    "jdbc:mysql://localhost:3306/test",
-                    "root",
-                    PASSWORD);
+            consultarUsuario(usuario);
+            mostrarArchivo(archivo);
+            hacerPing(usuario);
+        }
+    }
 
-            Statement stmt = con.createStatement();
+    private static void consultarUsuario(String usuario) {
 
-            // [VULN-04] Inyección SQL (CWE-89): la consulta se arma
-            // concatenando el texto ingresado por el usuario. Ejemplo de
-            // ataque en "usuario":  ' OR '1'='1
-            // Corrección: usar PreparedStatement con parámetros (?).
-            // SonarQube: S3649.
-            String query = "SELECT * FROM usuarios WHERE nombre = '" + usuario + "'";
-
-            // [CALIDAD-04] El resultado (ResultSet) de executeQuery se
-            // ignora: se ejecuta la consulta pero nunca se usa ni se cierra.
-            stmt.executeQuery(query);
-
-            // [VULN-05] Información sensible expuesta (CWE-200 / CWE-532):
-            // se imprimen en pantalla (y posiblemente en logs) la clave de la
-            // API y la contraseña. Nunca se deben mostrar secretos.
-            System.out.println("API KEY: " + API_KEY);
-            System.out.println("Contraseña: " + PASSWORD);
-
-            // [VULN-06] Path Traversal (CWE-22): el nombre del archivo lo
-            // controla el usuario y no se valida. Puede escribir
-            // ../../etc/passwd para salir de la carpeta prevista. Además se
-            // muestra la ruta absoluta (revela la estructura del servidor).
-            // Corrección: validar contra una carpeta base y usar
-            // file.getCanonicalPath() para comprobar que sigue dentro.
-            // SonarQube: S2083.
-            File file = new File(archivo);
-            System.out.println("Archivo: " + file.getAbsolutePath());
-
-            // [VULN-07] Inyección de comandos del sistema (CWE-78): se
-            // construye el comando con texto del usuario. Aunque exec(String)
-            // no usa una shell, el usuario puede agregar argumentos extra
-            // (por ejemplo "-f") y las herramientas SAST lo marcan como
-            // inseguro. Corrección: validar el host con una lista de
-            // caracteres permitidos y usar ProcessBuilder con argumentos
-            // separados. SonarQube: S2076.
-            Runtime.getRuntime().exec("ping " + usuario);
-
-            con.close();
-
-        } catch (Exception e) {
-
-            // [VULN-08] Exposición de información sensible en el manejo de
-            // errores (CWE-209 / CWE-497): printStackTrace muestra detalles
-            // internos (clases, rutas, datos de conexión). Debería usarse un
-            // logger y mostrar al usuario un mensaje genérico.
-            // SonarQube: S1148.
-            e.printStackTrace();
+        // [CORREGIDO VULN-01 / VULN-03] Credenciales desde el entorno. Se
+        // recomienda usar un usuario de base de datos con permisos mínimos
+        // (solo SELECT sobre "usuarios"), no "root".
+        String dbUser = System.getenv("DB_USER");
+        String dbPassword = System.getenv("DB_PASSWORD");
+        if (dbUser == null || dbPassword == null) {
+            LOGGER.severe("Faltan las variables de entorno DB_USER y DB_PASSWORD.");
+            return;
         }
 
-        sc.close();
+        // [CORREGIDO VULN-04] Consulta parametrizada (PreparedStatement): el
+        // dato del usuario nunca se mezcla con el texto SQL.
+        String query = "SELECT * FROM usuarios WHERE nombre = ?";
+
+        // [CORREGIDO CALIDAD-03] Connection, PreparedStatement y ResultSet se
+        // cierran automáticamente con try-with-resources.
+        try (Connection con = DriverManager.getConnection(DB_URL, dbUser, dbPassword);
+             PreparedStatement ps = con.prepareStatement(query)) {
+
+            ps.setString(1, usuario);
+
+            // [CORREGIDO CALIDAD-04] Ahora el resultado sí se usa y se cierra.
+            try (ResultSet rs = ps.executeQuery()) {
+                System.out.println(rs.next()
+                        ? "Usuario encontrado."
+                        : "Usuario no encontrado.");
+            }
+
+            // [CORREGIDO VULN-05] Ya no se imprimen la API key ni la
+            // contraseña.
+
+        } catch (SQLException e) {
+            // [CORREGIDO CALIDAD-02 / VULN-08] Se captura la excepción
+            // específica (SQLException). El detalle técnico va al logger
+            // (en producción, a un archivo protegido) y al usuario solo se
+            // le muestra un mensaje genérico.
+            LOGGER.log(Level.SEVERE, "Error al consultar la base de datos", e);
+            System.out.println("No se pudo completar la consulta.");
+        }
+    }
+
+    private static void mostrarArchivo(String archivo) {
+        try {
+            // [CORREGIDO VULN-06] Path Traversal: la ruta se resuelve dentro
+            // de la carpeta base y se normaliza (elimina "../"). Si el
+            // resultado queda fuera de la carpeta base (incluye rutas
+            // absolutas como /etc/passwd), se rechaza.
+            Path ruta = CARPETA_BASE.resolve(archivo).normalize();
+            if (!ruta.startsWith(CARPETA_BASE)) {
+                System.out.println("Ruta de archivo no permitida.");
+                return;
+            }
+
+            File file = ruta.toFile();
+
+            // [CORREGIDO VULN-06] Solo se muestra el nombre, no la ruta
+            // absoluta (no se revela la estructura del servidor).
+            System.out.println("Archivo: " + file.getName());
+
+        } catch (InvalidPathException e) {
+            System.out.println("Nombre de archivo inválido.");
+        }
+    }
+
+    private static void hacerPing(String host) {
+
+        // [CORREGIDO VULN-07] Se usa ProcessBuilder con cada argumento por
+        // separado (no se arma un texto de comando) y el host ya fue
+        // validado con PATRON_SEGURO. Se usa "-n" en Windows y "-c" en el
+        // resto de sistemas.
+        String opcion = System.getProperty("os.name").toLowerCase().contains("win")
+                ? "-n" : "-c";
+        ProcessBuilder pb = new ProcessBuilder("ping", opcion, "1", host);
+        pb.inheritIO();
+
+        try {
+            Process proceso = pb.start();
+
+            // Tiempo máximo de espera para que no se quede colgado.
+            if (!proceso.waitFor(5, TimeUnit.SECONDS)) {
+                proceso.destroyForcibly();
+                System.out.println("El ping tardó demasiado y se canceló.");
+            }
+
+        } catch (IOException e) {
+            LOGGER.log(Level.WARNING, "No se pudo ejecutar el comando ping", e);
+            System.out.println("No se pudo ejecutar ping.");
+        } catch (InterruptedException e) {
+            Thread.currentThread().interrupt();
+            System.out.println("Operación interrumpida.");
+        }
     }
 }
